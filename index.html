@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="id">
+
+<head>
+  <meta charset="UTF-8" />
+  <!-- Basis URL untuk hosting subfolder (mis. man2plg.sch.id/eujian-mandupa/).
+       Saat halaman dibuka pada URL rute yang dalam (mis. .../eujian-mandupa/dashboard/auth
+       atau .../eujian-mandupa/ujian/ID saat refresh), aset relatif (./assets/*.js|css)
+       ikut dihitung dari subfolder rute -> 404 -> halaman blank putih.
+       Skrip ini mengunci <base> ke folder app dan menormalisasi URL lama. -->
+  <script>
+    (function () {
+      var p = location.pathname.replace(/\/index\.html$/i, "");
+      // URL lama ".../dashboard/auth" -> halaman login yang benar.
+      var legacy = p.match(/^(.*)\/dashboard\/auth\/?$/i);
+      if (legacy) {
+        location.replace((legacy[1] || "") + "/auth" + location.search + location.hash);
+        return;
+      }
+      var folder = p
+        .replace(/\/(auth|dashboard|ujian)(\/[^/]*)*$/i, "")
+        .replace(/\/+$/, "");
+      var base = document.createElement("base");
+      base.href = folder + "/";
+      document.head.insertBefore(base, document.currentScript || document.head.firstChild);
+    })();
+  </script>
+  <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#14171c" />
+  <meta name="description" content="UjianAman — PWA ujian online wajib offline untuk HP siswa. Unduh soal, matikan internet, kerjakan ujian, lalu kirim jawaban." />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <title>UjianAman — Ujian Online Wajib Offline</title>
+  <script type="module" crossorigin src="./assets/index-BESH8dMT.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/react-vendor-JLQRl-7U.js">
+  <link rel="modulepreload" crossorigin href="./assets/framer-motion-cG5F6xgX.js">
+  <link rel="modulepreload" crossorigin href="./assets/radix-ui-D9hAGFE7.js">
+  <link rel="modulepreload" crossorigin href="./assets/charts-COktYLGC.js">
+  <link rel="stylesheet" crossorigin href="./assets/index-fhRuABWe.css">
+</head>
+
+
+<body>
+  <div id="root"></div>
+</body>
+
+</html>

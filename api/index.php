@@ -136,7 +136,10 @@ function pastikanStruktur(): void
             dibuat DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             tgl_mulai VARCHAR(16) NOT NULL DEFAULT '',
             sasar_jenis VARCHAR(16) NOT NULL DEFAULT '',
-            sasar_nilai VARCHAR(255) NOT NULL DEFAULT ''
+            sasar_nilai VARCHAR(255) NOT NULL DEFAULT '',
+            mapel VARCHAR(100) NOT NULL DEFAULT '',
+            guru_nip VARCHAR(32) NOT NULL DEFAULT '',
+            guru_nama VARCHAR(160) NOT NULL DEFAULT ''
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         "CREATE TABLE IF NOT EXISTS soal (
             id VARCHAR(40) NOT NULL PRIMARY KEY,
@@ -149,6 +152,9 @@ function pastikanStruktur(): void
             opsi_e VARCHAR(600) NOT NULL DEFAULT '',
             opsi_huruf TINYINT(1) NOT NULL DEFAULT 0,
             kunci_jawaban VARCHAR(1) NOT NULL DEFAULT '',
+            tipe VARCHAR(10) NOT NULL DEFAULT 'pg',
+            kunci_teks TEXT NULL,
+            bacaan_id VARCHAR(40) NOT NULL DEFAULT '',
             gambar MEDIUMTEXT NULL,
             dibuat DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             KEY idx_soal_ujian (ujian_id)
@@ -163,6 +169,7 @@ function pastikanStruktur(): void
             benar INT NOT NULL DEFAULT 0,
             total_soal INT NOT NULL DEFAULT 0,
             nilai INT NOT NULL DEFAULT 0,
+            poin INT NOT NULL DEFAULT 0,
             total_pelanggaran INT NOT NULL DEFAULT 0,
             timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             KEY idx_hasil_ujian (ujian_id),
@@ -184,6 +191,42 @@ function pastikanStruktur(): void
         "CREATE TABLE IF NOT EXISTS pengaturan (
             kunci VARCHAR(64) NOT NULL PRIMARY KEY,
             nilai TEXT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        "CREATE TABLE IF NOT EXISTS ruang (
+            id VARCHAR(40) NOT NULL PRIMARY KEY,
+            nama VARCHAR(64) NOT NULL,
+            kapasitas INT NOT NULL DEFAULT 20,
+            komposisi TEXT NULL,
+            urutan INT NOT NULL DEFAULT 0,
+            dibuat DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        "CREATE TABLE IF NOT EXISTS penempatan (
+            ruang_id VARCHAR(40) NOT NULL,
+            nisn VARCHAR(32) NOT NULL,
+            nama VARCHAR(160) NOT NULL DEFAULT '',
+            kelas VARCHAR(64) NOT NULL DEFAULT '',
+            kursi INT NOT NULL DEFAULT 0,
+            PRIMARY KEY (ruang_id, kursi),
+            KEY idx_penempatan_nisn (nisn)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        "CREATE TABLE IF NOT EXISTS jadwal_pengawas (
+            id VARCHAR(40) NOT NULL PRIMARY KEY,
+            hari_ke INT NOT NULL DEFAULT 1,
+            tanggal VARCHAR(16) NOT NULL DEFAULT '',
+            sesi INT NOT NULL DEFAULT 1,
+            jam VARCHAR(16) NOT NULL DEFAULT '',
+            ruang_id VARCHAR(40) NOT NULL DEFAULT '',
+            ruang_nama VARCHAR(64) NOT NULL DEFAULT '',
+            nip VARCHAR(32) NOT NULL DEFAULT '',
+            nama VARCHAR(160) NOT NULL DEFAULT '',
+            KEY idx_jadwal_tanggal (tanggal)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        "CREATE TABLE IF NOT EXISTS jadwal_harian (
+            tanggal VARCHAR(16) NOT NULL,
+            sesi INT NOT NULL DEFAULT 1,
+            mapel VARCHAR(160) NOT NULL DEFAULT '',
+            pengawas TEXT NULL,
+            PRIMARY KEY (tanggal, sesi)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
     ];
 
@@ -226,6 +269,44 @@ function pastikanStruktur(): void
     if ($kolom && strtolower((string) ($kolom['t'] ?? '')) === 'text') {
         db()->exec('ALTER TABLE pengaturan MODIFY nilai MEDIUMTEXT NULL');
     }
+
+    // Upgrade v2: mapel ujian + guru penanggung jawab soal, tipe soal
+    // (pilihan ganda / essay / uraian), teks bacaan bersama & poin koreksi.
+    foreach ([
+        ['ujian', 'mapel', "ALTER TABLE ujian ADD COLUMN mapel VARCHAR(100) NOT NULL DEFAULT '' AFTER sasar_nilai"],
+        ['ujian', 'guru_nip', "ALTER TABLE ujian ADD COLUMN guru_nip VARCHAR(32) NOT NULL DEFAULT '' AFTER mapel"],
+        ['ujian', 'guru_nama', "ALTER TABLE ujian ADD COLUMN guru_nama VARCHAR(160) NOT NULL DEFAULT '' AFTER guru_nip"],
+        ['soal', 'tipe', "ALTER TABLE soal ADD COLUMN tipe VARCHAR(10) NOT NULL DEFAULT 'pg' AFTER kunci_jawaban"],
+        ['soal', 'kunci_teks', 'ALTER TABLE soal ADD COLUMN kunci_teks TEXT NULL AFTER tipe'],
+        ['soal', 'bacaan_id', "ALTER TABLE soal ADD COLUMN bacaan_id VARCHAR(40) NOT NULL DEFAULT '' AFTER kunci_teks"],
+        ['hasil', 'poin', 'ALTER TABLE hasil ADD COLUMN poin INT NOT NULL DEFAULT 0 AFTER nilai'],
+    ] as $mig) {
+        $st = db()->query("SHOW COLUMNS FROM {$mig[0]} LIKE '{$mig[1]}'");
+        if ($st->fetch() === false) db()->exec($mig[2]);
+    }
+
+    // Teks bacaan bersama (dipakai beberapa soal) + jawaban essay/uraian
+    // yang dinilai manual lewat menu Koreksi.
+    db()->exec(
+        "CREATE TABLE IF NOT EXISTS bacaan (
+            id VARCHAR(40) NOT NULL PRIMARY KEY,
+            ujian_id VARCHAR(40) NOT NULL,
+            judul VARCHAR(200) NOT NULL DEFAULT '',
+            teks MEDIUMTEXT NOT NULL,
+            KEY idx_bacaan_ujian (ujian_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    );
+    db()->exec(
+        "CREATE TABLE IF NOT EXISTS jawaban_teks (
+            hasil_id VARCHAR(40) NOT NULL,
+            soal_id VARCHAR(40) NOT NULL,
+            ujian_id VARCHAR(40) NOT NULL DEFAULT '',
+            teks MEDIUMTEXT NOT NULL,
+            skor INT NULL,
+            PRIMARY KEY (hasil_id, soal_id),
+            KEY idx_jawaban_teks_hasil (hasil_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    );
 
     $siap = true;
 }
@@ -277,17 +358,29 @@ const AKSES = [
     'getUjian' => 1, 'getSoalAdmin' => 1, 'getHasil' => 1, 'getSiswa' => 1,
     'getKelasList' => 1, 'tambahSiswa' => 1, 'ubahSiswa' => 1, 'hapusSiswa' => 1,
     'hapusSiswaMassal' => 1, 'importSiswa' => 1, 'buatAkunSiswa' => 1,
-    'buatUjian' => 1, 'aturUjian' => 1,
-    'setAktifUjian' => 1, 'setIzinUnduh' => 1, 'hapusUjian' => 1, 'konfirmasiUjian' => 1,
+    'konfirmasiUjian' => 1,
     'tambahSoal' => 1, 'ubahSoal' => 1, 'tambahSoalContoh' => 1, 'hapusSoal' => 1,
     'imporSoal' => 1,
     'getGuru' => 1, 'tambahGuru' => 1, 'ubahGuru' => 1, 'hapusGuru' => 1,
     'hapusGuruMassal' => 1, 'ubahPasswordGuru' => 1,
     'importGuru' => 1, 'buatAkunGuru' => 1,
+    'simpanBacaan' => 1, 'hapusBacaan' => 1,
+    'getKoreksi' => 1, 'getJawabanKoreksi' => 1, 'simpanKoreksi' => 1,
+
+    // Penugasan ujian (mapel + guru pembuat soal), jadwal, token & status:
+    // HANYA admin. Guru cuma boleh mengelola soal ujian yang ditugaskan padanya.
+    'buatUjian' => 2, 'aturUjian' => 2, 'setAktifUjian' => 2,
+    'setIzinUnduh' => 2, 'hapusUjian' => 2,
 
     'getPengaturan' => 2, 'aturPin' => 2, 'buatPengguna' => 2,
     'ubahPeran' => 2, 'getPengguna' => 2, 'ubahPasswordPengguna' => 2,
     'getKartuSet' => 2, 'aturKartuSet' => 2,
+
+    'getRuangSet' => 2, 'simpanRuang' => 2, 'hapusRuang' => 2,
+    'simpanPengawas' => 2, 'buatJadwalPengawas' => 2, 'buatPenempatan' => 2,
+
+    'getSetelGas' => 2, 'setelGas' => 2, 'getGuruGas' => 2,
+    'jadwalHarianHarianGas' => 2, 'jadwalHarianSimpanGas' => 2,
 ];
 
 function tingkatPeran($role): int
@@ -441,7 +534,7 @@ function jalankan(string $action, array $d): array
         case 'login': return a_login($d);
         case 'getUjianSiswa': return a_getUjianSiswa($d);
         case 'getUjianInfo': return a_getUjianInfo($d);
-        case 'getUjian': return a_getUjian();
+        case 'getUjian': return a_getUjian($d);
         case 'getSoal': return a_getSoal($d);
         case 'getSoalAdmin': return a_getSoalAdmin($d);
         case 'getHasil': return a_getHasil($d);
@@ -466,12 +559,28 @@ function jalankan(string $action, array $d): array
         case 'tambahSoalContoh': return a_tambahSoalContoh($d);
         case 'imporSoal': return a_imporSoal($d);
         case 'hapusSoal': return a_hapusSoal($d);
+        case 'simpanBacaan': return a_simpanBacaan($d);
+        case 'hapusBacaan': return a_hapusBacaan($d);
+        case 'getKoreksi': return a_getKoreksi($d);
+        case 'getJawabanKoreksi': return a_getJawabanKoreksi($d);
+        case 'simpanKoreksi': return a_simpanKoreksi($d);
         case 'submitJawaban': return a_submitJawaban($d);
         case 'catatBukaKunci': return a_catatBukaKunci($d);
         case 'getPengaturan': return a_getPengaturan();
         case 'aturPin': return a_aturPin($d);
         case 'getKartuSet': return a_getKartuSet();
         case 'aturKartuSet': return a_aturKartuSet($d);
+        case 'getRuangSet': return a_getRuangSet();
+        case 'simpanRuang': return a_simpanRuang($d);
+        case 'hapusRuang': return a_hapusRuang($d);
+        case 'simpanPengawas': return a_simpanPengawas($d);
+        case 'buatJadwalPengawas': return a_buatJadwalPengawas($d);
+        case 'buatPenempatan': return a_buatPenempatan($d);
+        case 'getSetelGas': return a_getSetelGas();
+        case 'setelGas': return a_setelGas($d);
+        case 'getGuruGas': return a_getGuruGas();
+        case 'jadwalHarianHarianGas': return a_jadwalHarianHarianGas($d);
+        case 'jadwalHarianSimpanGas': return a_jadwalHarianSimpanGas($d);
         case 'buatPengguna': return a_buatPengguna($d);
         case 'ubahPeran': return a_ubahPeran($d);
         case 'ubahPasswordPengguna': return a_ubahPasswordPengguna($d);
@@ -494,7 +603,9 @@ function jalankan(string $action, array $d): array
 function a_ping(): array
 {
     $r = satu('SELECT COUNT(*) AS n FROM pengguna');
-    return ['success' => true, 'siap' => (int) ($r['n'] ?? 0) > 0];
+    // 'versi' = penanda rilis: memudahkan memastikan berkas api/index.php di
+    // hosting memang sudah versi terbaru (buka ?action=ping).
+    return ['success' => true, 'siap' => (int) ($r['n'] ?? 0) > 0, 'versi' => 'penugasan-guru-2'];
 }
 
 function a_setupAdmin(array $d): array
@@ -721,10 +832,38 @@ function a_ubahSiswa(array $d): array
 {
     $v = validasiSiswa($d);
     if (isset($v['error'])) return galat($v['error']);
+    $id = bersih($d['id'] ?? '');
+    if ($id === '') return galat('Siswa tidak ditemukan.');
+    if (satu('SELECT id FROM siswa WHERE nisn = ? AND id <> ?', [$v['nisn'], $id])) {
+        return galat('NISN "' . $v['nisn'] . '" sudah dipakai siswa lain.');
+    }
+    $lama = satu('SELECT nisn FROM siswa WHERE id = ?', [$id]);
     $n = jalan(
         'UPDATE siswa SET nisn = ?, nama = ?, tgllahir = ?, kelas = ? WHERE id = ?',
-        [$v['nisn'], $v['nama'], $v['tgllahir'], $v['kelas'], bersih($d['id'] ?? '')]
+        [$v['nisn'], $v['nama'], $v['tgllahir'], $v['kelas'], $id]
     );
+    if ($n > 0) {
+        // Sinkron akun login siswa (username = NISN). Login membaca tabel
+        // pengguna, bukan tabel siswa — tanpa sinkron ini, siswa yang login
+        // masih melihat nama/kelas lama walau data siswa sudah benar.
+        $kunciLama = $lama ? strtolower(bersih($lama['nisn'])) : '';
+        $kunciBaru = strtolower($v['nisn']);
+        if ($kunciLama !== '') {
+            jalan(
+                "UPDATE pengguna SET nama = ?, kelas = ? WHERE username = ? AND role NOT IN ('guru','admin')",
+                [$v['nama'], $v['kelas'], $kunciLama]
+            );
+            // NISN berubah → username akun login ikut diganti (dengan jaga
+            // agar tidak menimpa akun lain yang sudah memakai NISN baru).
+            if ($kunciBaru !== $kunciLama
+                && !satu('SELECT id FROM pengguna WHERE username = ?', [$kunciBaru])) {
+                jalan(
+                    "UPDATE pengguna SET username = ? WHERE username = ? AND role NOT IN ('guru','admin')",
+                    [$kunciBaru, $kunciLama]
+                );
+            }
+        }
+    }
     return $n > 0 ? ['success' => true, 'message' => 'Data siswa diperbarui.'] : galat('Siswa tidak ditemukan.');
 }
 
@@ -890,6 +1029,17 @@ function a_ubahGuru(array $d): array
             && !satu('SELECT id FROM pengguna WHERE username = ?', [$baruKunci])) {
             $p = jalan("UPDATE pengguna SET username = ? WHERE username = ? AND role = 'guru'", [$baruKunci, $lamaKunci]);
             if ($p === 0) jalan('UPDATE pengguna SET username = ? WHERE username = ?', [$baruKunci, $lamaKunci]);
+            // Rename bisa mengenai akun bekas peran 'siswa' — samakan peran.
+            samakanPeranGuru($baruKunci, bersih($v['nama']));
+        }
+        // Sinkron nama & mapel ke akun login (username = NIP). Login membaca
+        // tabel pengguna — tanpa sinkron ini tampilan guru tetap nama/mapel
+        // lama walau data guru sudah benar (sama seperti kasus siswa).
+        if ($baruKunci !== '') {
+            jalan(
+                "UPDATE pengguna SET nama = ?, kelas = ? WHERE username = ? AND role = 'guru'",
+                [bersih($v['nama']), bersih($v['mapel']), $baruKunci]
+            );
         }
     }
     return $n > 0 ? ['success' => true, 'message' => 'Data guru diperbarui.'] : galat('Guru tidak ditemukan.');
@@ -914,6 +1064,32 @@ function a_hapusGuruMassal(array $d): array
     return $n > 0
         ? ['success' => true, 'hapus' => $n, 'message' => $n . ' guru dihapus.']
         : galat('Guru tidak ditemukan.');
+}
+
+/**
+ * Kembalikan akun login guru (username = NIP) ke peran 'guru' bila masih
+ * berperan 'siswa' — kasus lama: akun dibuat lebih dulu dari data siswa /
+ * peran lupa diset, sehingga login guru masuk tampilan siswa. Perbaikan
+ * hanya dilakukan bila aman: nama akun cocok dengan nama guru, atau nama
+ * akun masih placeholder (= username). Selain itu admin diminta memeriksa
+ * menu Pengguna (jangan otomatis menaikkan peran akun yang namanya beda).
+ * @return array{status:'sudah'|'diperbaiki'|'perlu-cek', role:string}
+ */
+function samakanPeranGuru(string $kunciUsername, string $namaGuru): array
+{
+    $u = satu('SELECT id, nama, role FROM pengguna WHERE username = ? LIMIT 1', [$kunciUsername]);
+    if (!$u) return ['status' => 'perlu-cek', 'role' => ''];
+    $role = strtolower(bersih($u['role']));
+    if ($role === 'guru') return ['status' => 'sudah', 'role' => $role];
+    $namaAkun = strtolower(trim(bersih($u['nama'])));
+    $namaGuruBersih = strtolower(trim($namaGuru));
+    $cocok = ($namaGuruBersih !== '' && $namaAkun === $namaGuruBersih)
+        || $namaAkun === '' || $namaAkun === strtolower($kunciUsername);
+    if ($role === 'siswa' && $cocok) {
+        jalan("UPDATE pengguna SET role = 'guru' WHERE id = ?", [(string) $u['id']]);
+        return ['status' => 'diperbaiki', 'role' => 'guru'];
+    }
+    return ['status' => 'perlu-cek', 'role' => $role];
 }
 
 /**
@@ -949,6 +1125,16 @@ function a_ubahPasswordGuru(array $d): array
     }
     if ($ada) {
         jalan('UPDATE pengguna SET password = ? WHERE id = ?', [$pass, (string) $ada['id']]);
+        // Akun guru bisa tersisa berperan 'siswa' (dibuat lama dari data siswa
+        // / peran lupa diset) — perbaiki otomatis bila namanya cocok, supaya
+        // login guru tidak masuk tampilan siswa.
+        $peran = samakanPeranGuru($kunci, bersih($g['nama']));
+        if ($peran['status'] === 'diperbaiki') {
+            return ['success' => true, 'message' => 'Password guru & akun login (username ' . $nip . ') diperbarui — peran akun diperbaiki otomatis menjadi Guru.'];
+        }
+        if ($peran['status'] === 'perlu-cek') {
+            return ['success' => true, 'message' => 'Password guru diperbarui, tetapi akun username ' . $nip . ' berperan "' . $peran['role'] . '" — buka tab Pengguna dan ubah perannya ke Guru bila akun ini memang untuk guru.'];
+        }
     } else {
         // (3) Akun login belum ada sama sekali → buat otomatis supaya password baru bisa dipakai.
         jalan(
@@ -1023,10 +1209,24 @@ function a_buatAkunGuru(array $d): array
 
     $dibuat = 0;
     $lewati = 0;
+    $diperbaiki = 0;
+    $perluCek = [];
     foreach ($guru as $g) {
         $nip = bersih($g['nip']);
         $kunci = strtolower($nip);
-        if ($nip === '' || isset($ada[$kunci])) {
+        if ($nip === '') {
+            $lewati++;
+            continue;
+        }
+        if (isset($ada[$kunci])) {
+            // Akun sudah ada — pastikan perannya 'guru', bukan sisa 'siswa'
+            // (login guru dengan akun itu akan masuk tampilan siswa).
+            $peran = samakanPeranGuru($kunci, bersih($g['nama']));
+            if ($peran['status'] === 'diperbaiki') {
+                $diperbaiki++;
+            } elseif ($peran['status'] === 'perlu-cek') {
+                $perluCek[] = $nip . ' (peran: ' . $peran['role'] . ')';
+            }
             $lewati++;
             continue;
         }
@@ -1040,6 +1240,8 @@ function a_buatAkunGuru(array $d): array
     }
     $pesan = $dibuat . ' akun guru dibuat (username = NIP).';
     if ($lewati) $pesan .= ' ' . $lewati . ' dilewati (sudah ada).';
+    if ($diperbaiki) $pesan .= ' ' . $diperbaiki . ' peran diperbaiki otomatis menjadi Guru.';
+    if ($perluCek) $pesan .= ' Periksa tab Pengguna untuk: ' . implode(', ', $perluCek) . '.';
     return ['success' => true, 'dibuat' => $dibuat, 'lewati' => $lewati, 'message' => $pesan];
 }
 
@@ -1121,7 +1323,12 @@ function barisUjian(array $r, ?string $kelasSiswa, bool $sertakanToken = false):
         'tgl_mulai' => (string) $r['tgl_mulai'],
         'sasar_jenis' => (string) $r['sasar_jenis'],
         'sasar_nilai' => (string) $r['sasar_nilai'],
+        'mapel' => (string) ($r['mapel'] ?? ''),
     ];
+    if ($sertakanToken) {
+        $u['guru_nip'] = (string) ($r['guru_nip'] ?? '');
+        $u['guru_nama'] = (string) ($r['guru_nama'] ?? '');
+    }
     $u['sasaran'] = sasaranLabel($u['sasar_jenis'], $u['sasar_nilai']);
     $u['boleh'] = $kelasSiswa === null ? true : cocokSasar($u, $kelasSiswa);
     if ($sertakanToken) $u['token'] = (string) $r['token'];
@@ -1131,6 +1338,60 @@ function barisUjian(array $r, ?string $kelasSiswa, bool $sertakanToken = false):
 function cariUjian(string $id): ?array
 {
     return satu('SELECT * FROM ujian WHERE id = ? LIMIT 1', [$id]);
+}
+
+/**
+ * Bolehkah peran saat ini mengelola ujian ini?
+ * Admin bebas; guru HANYA ujian yang ditugaskan kepadanya
+ * (ujian.guru_nip = username login guru = NIP, huruf kecil).
+ */
+function bolehUjian(?array $ujian, string $peran, string $pengguna): bool
+{
+    if ($ujian === null) return false;
+    if (strtolower($peran) === 'admin') return true;
+    if (strtolower($peran) !== 'guru') return false;
+    $nip = strtolower(bersih($ujian['guru_nip'] ?? ''));
+    return $nip !== '' && $nip === strtolower(bersih($pengguna));
+}
+
+/** Cari guru di tabel guru menurut NIP (tanpa peduli huruf besar/kecil). */
+function cariGuruNip(string $nip): ?array
+{
+    $nip = bersih($nip);
+    if ($nip === '') return null;
+    return satu('SELECT nip, nama, mapel FROM guru WHERE LOWER(nip) = ? LIMIT 1', [strtolower($nip)]);
+}
+
+/**
+ * Validasi penugasan ujian: mapel + guru pembuat soal.
+ * Nama guru SELALU diambil dari tabel guru (bukan dari kiriman klien).
+ * @param bool $wajib true saat membuat ujian: mapel & guru harus terisi.
+ * @return array{mapel?:string, guru_nip?:string, guru_nama?:string, error?:string}
+ */
+function validasiPenugasan(array $d, bool $wajib): array
+{
+    $mapel = bersih($d['mapel'] ?? '');
+    $nip = bersih($d['guru_nip'] ?? '');
+    if ($nip === '') {
+        if ($wajib) return ['error' => 'Pilih guru pembuat soal untuk ujian ini.'];
+        return ['mapel' => $mapel, 'guru_nip' => '', 'guru_nama' => ''];
+    }
+    $g = cariGuruNip($nip);
+    if (!$g) return ['error' => 'Guru dengan NIP itu tidak ada di Data Guru.'];
+    if ($mapel === '') $mapel = bersih($g['mapel']);
+    if ($wajib && $mapel === '') return ['error' => 'Mata pelajaran wajib diisi.'];
+    return ['mapel' => $mapel, 'guru_nip' => (string) $g['nip'], 'guru_nama' => (string) $g['nama']];
+}
+
+/** Gerbang guard: kembalikan galat bila guru tidak berhak atas ujian ini. */
+function tolakBilaBukanMilik(array $d, string $ujianId, string $pesan = ''): ?array
+{
+    $u = cariUjian($ujianId);
+    if (!$u) return galat('Ujian tidak ditemukan.');
+    if (!bolehUjian($u, (string) ($d['sesi_role'] ?? ''), (string) ($d['sesi_user'] ?? ''))) {
+        return galat($pesan !== '' ? $pesan : 'Ujian ini ditugaskan ke guru lain.');
+    }
+    return null;
 }
 
 /** Daftar ujian aktif untuk siswa + kelayakan, izin unduh & status unduh. */
@@ -1162,11 +1423,21 @@ function a_getUjianInfo(array $d): array
     return ['success' => true, 'ujian' => $u];
 }
 
-/** Daftar semua ujian untuk admin/guru — DENGAN token. */
-function a_getUjian(): array
+/**
+ * Daftar ujian untuk petugas — DENGAN token.
+ * Admin melihat semua; guru HANYA ujian yang ditugaskan kepadanya.
+ */
+function a_getUjian(array $d): array
 {
     $rows = semua('SELECT * FROM ujian ORDER BY dibuat DESC');
-    return ['success' => true, 'ujian' => array_map(fn($r) => barisUjian($r, null, true), $rows)];
+    $peran = (string) ($d['sesi_role'] ?? '');
+    $pengguna = (string) ($d['sesi_user'] ?? '');
+    $daftar = [];
+    foreach ($rows as $r) {
+        if (!bolehUjian($r, $peran, $pengguna)) continue;
+        $daftar[] = barisUjian($r, null, true);
+    }
+    return ['success' => true, 'ujian' => $daftar];
 }
 
 function validasiSasar($jenis, $nilai): array
@@ -1210,11 +1481,13 @@ function a_buatUjian(array $d): array
     $sasar = validasiSasar($d['sasar_jenis'] ?? '', $d['sasar_nilai'] ?? '');
     if (isset($sasar['error'])) return galat($sasar['error']);
     $tgl = validasiTglMulai($d['tgl_mulai'] ?? '');
+    $tugas = validasiPenugasan($d, true);
+    if (isset($tugas['error'])) return galat($tugas['error']);
 
     $id = idBaru('u');
     jalan(
-        'INSERT INTO ujian (id, judul, deskripsi, token, durasi_menit, aktif, boleh_unduh, tgl_mulai, sasar_jenis, sasar_nilai)
-         VALUES (?,?,?,?,?,0,0,?,?,?)',
+        'INSERT INTO ujian (id, judul, deskripsi, token, durasi_menit, aktif, boleh_unduh, tgl_mulai, sasar_jenis, sasar_nilai, mapel, guru_nip, guru_nama)
+         VALUES (?,?,?,?,?,0,0,?,?,?,?,?,?)',
         [
             $id,
             $judul,
@@ -1224,6 +1497,9 @@ function a_buatUjian(array $d): array
             $tgl,
             $sasar['jenis'],
             $sasar['nilai'],
+            $tugas['mapel'],
+            $tugas['guru_nip'],
+            $tugas['guru_nama'],
         ]
     );
     return ['success' => true, 'id' => $id, 'token' => $token, 'message' => 'Ujian dibuat (masih draft).'];
@@ -1238,10 +1514,22 @@ function a_aturUjian(array $d): array
     $sasar = validasiSasar($d['sasar_jenis'] ?? '', $d['sasar_nilai'] ?? '');
     if (isset($sasar['error'])) return galat($sasar['error']);
     $tgl = validasiTglMulai($d['tgl_mulai'] ?? '');
+    $id = bersih($d['id'] ?? '');
+    if (!cariUjian($id)) return galat('Ujian tidak ditemukan.');
+    if (array_key_exists('mapel', $d) || array_key_exists('guru_nip', $d)) {
+        // Admin mengubah mapel & guru penanggung jawab soal. Divalidasi dulu
+        // (guru harus ada di Data Guru) sebelum ada yang disimpan.
+        $tugas = validasiPenugasan($d, false);
+        if (isset($tugas['error'])) return galat($tugas['error']);
+        jalan(
+            'UPDATE ujian SET mapel = ?, guru_nip = ?, guru_nama = ? WHERE id = ?',
+            [$tugas['mapel'], $tugas['guru_nip'], $tugas['guru_nama'], $id]
+        );
+    }
 
     $n = jalan(
         'UPDATE ujian SET token = ?, durasi_menit = ?, tgl_mulai = ?, sasar_jenis = ?, sasar_nilai = ? WHERE id = ?',
-        [$token, $durasi, $tgl, $sasar['jenis'], $sasar['nilai'], bersih($d['id'] ?? '')]
+        [$token, $durasi, $tgl, $sasar['jenis'], $sasar['nilai'], $id]
     );
     return $n > 0 ? ['success' => true, 'message' => 'Pengaturan ujian disimpan.'] : galat('Ujian tidak ditemukan.');
 }
@@ -1270,6 +1558,8 @@ function a_konfirmasiUjian(array $d): array
 {
     $id = bersih($d['id'] ?? '');
     $on = !empty($d['konfirmasi']) ? 1 : 0;
+    $tolak = tolakBilaBukanMilik($d, $id);
+    if ($tolak) return $tolak;
     if (!satu('SELECT id FROM ujian WHERE id = ?', [$id])) return galat('Ujian tidak ditemukan.');
     if ($on) {
         jalan('UPDATE ujian SET konfirmasi_guru = 1, konfirmasi_pada = NOW() WHERE id = ?', [$id]);
@@ -1302,8 +1592,8 @@ function sisipSoal(string $ujianId, array $s): string
 {
     $id = idBaru('s');
     jalan(
-        'INSERT INTO soal (id, ujian_id, pertanyaan, opsi_a, opsi_b, opsi_c, opsi_d, opsi_e, opsi_huruf, kunci_jawaban, gambar)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+        'INSERT INTO soal (id, ujian_id, pertanyaan, opsi_a, opsi_b, opsi_c, opsi_d, opsi_e, opsi_huruf, kunci_jawaban, gambar, tipe, kunci_teks, bacaan_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         [
             $id,
             $ujianId,
@@ -1316,13 +1606,19 @@ function sisipSoal(string $ujianId, array $s): string
             (int) ($s['opsi_huruf'] ?? 0),
             $s['kunci_jawaban'],
             (string) ($s['gambar'] ?? ''),
+            (string) ($s['tipe'] ?? 'pg'),
+            (string) ($s['kunci_teks'] ?? ''),
+            (string) ($s['bacaan_id'] ?? ''),
         ]
     );
     return $id;
 }
 
-function barisSoal(array $r, bool $denganKunci): array
+function barisSoal(array $r, bool $denganKunci, array $petaBacaan = []): array
 {
+    $tipe = strtolower(bersih($r['tipe'] ?? 'pg'));
+    if (!in_array($tipe, ['pg', 'essay', 'uraian'], true)) $tipe = 'pg';
+    $bacaanId = (string) ($r['bacaan_id'] ?? '');
     $out = [
         'id' => (string) $r['id'],
         'ujian_id' => (string) $r['ujian_id'],
@@ -1334,9 +1630,39 @@ function barisSoal(array $r, bool $denganKunci): array
         'opsi_e' => (string) $r['opsi_e'],
         'opsi_huruf' => (int) ($r['opsi_huruf'] ?? 0),
         'gambar' => (string) ($r['gambar'] ?? ''),
+        'tipe' => $tipe,
+        'bacaan_id' => $bacaanId,
     ];
-    if ($denganKunci) $out['kunci_jawaban'] = strtoupper(bersih($r['kunci_jawaban']));
+    // Teks bacaan bersama ikut disertakan agar tersimpan di HP siswa (offline).
+    if ($bacaanId !== '' && $petaBacaan !== []) {
+        $out['bacaan'] = (string) ($petaBacaan[$bacaanId] ?? '');
+    }
+    if ($denganKunci) {
+        $out['kunci_jawaban'] = strtoupper(bersih($r['kunci_jawaban']));
+        $out['kunci_teks'] = (string) ($r['kunci_teks'] ?? '');
+    }
     return $out;
+}
+
+/** Peta bacaan_id → teks untuk satu ujian (dipakai render daftar soal). */
+function petaBacaan(string $ujianId): array
+{
+    $peta = [];
+    foreach (semua('SELECT id, teks FROM bacaan WHERE ujian_id = ?', [$ujianId]) as $b) {
+        $peta[(string) $b['id']] = (string) $b['teks'];
+    }
+    return $peta;
+}
+
+/** Daftar teks bacaan milik satu ujian. */
+function daftarBacaan(string $ujianId): array
+{
+    return array_map(fn($b) => [
+        'id' => (string) $b['id'],
+        'ujian_id' => (string) $b['ujian_id'],
+        'judul' => (string) $b['judul'],
+        'teks' => (string) $b['teks'],
+    ], semua('SELECT * FROM bacaan WHERE ujian_id = ? ORDER BY id', [$ujianId]));
 }
 
 /**
@@ -1383,8 +1709,9 @@ function a_getSoal(array $d): array
     );
 
     $daftar = [];
+    $peta = petaBacaan($id);
     foreach (semua('SELECT * FROM soal WHERE ujian_id = ?', [$id]) as $s) {
-        $daftar[] = barisSoal($s, false);
+        $daftar[] = barisSoal($s, false, $peta);
     }
     if (!$daftar) return galat('Ujian ini belum memiliki soal.');
 
@@ -1399,24 +1726,56 @@ function a_getSoal(array $d): array
     ];
 }
 
-/** Soal untuk petugas: DENGAN kunci jawaban. */
+/** Soal untuk petugas: DENGAN kunci jawaban + daftar teks bacaan. */
 function a_getSoalAdmin(array $d): array
 {
+    $ujianId = bersih($d['ujian_id'] ?? '');
+    $tolak = tolakBilaBukanMilik($d, $ujianId);
+    if ($tolak) return $tolak;
+    $peta = petaBacaan($ujianId);
     $daftar = [];
-    foreach (semua('SELECT * FROM soal WHERE ujian_id = ?', [bersih($d['ujian_id'] ?? '')]) as $s) {
-        $daftar[] = barisSoal($s, true);
+    foreach (semua('SELECT * FROM soal WHERE ujian_id = ?', [$ujianId]) as $s) {
+        $daftar[] = barisSoal($s, true, $peta);
     }
-    return ['success' => true, 'soal' => $daftar];
+    return ['success' => true, 'soal' => $daftar, 'bacaan' => daftarBacaan($ujianId)];
 }
 
 /**
  * Validasi isi soal bersama (tambah / ubah / impor massal).
- * @return array{error:string}|array{pertanyaan:string,opsi_a:string,opsi_b:string,opsi_c:string,opsi_d:string,opsi_e:string,kunci_jawaban:string,gambar:string,opsi_huruf:int}
+ * @return array{error:string}|array{pertanyaan:string,opsi_a:string,opsi_b:string,opsi_c:string,opsi_d:string,opsi_e:string,kunci_jawaban:string,gambar:string,opsi_huruf:int,tipe:string,kunci_teks:string,bacaan_id:string}
  */
 function validasiIsiSoal(array $d): array
 {
     $pertanyaan = bersih($d['pertanyaan'] ?? '');
     if ($pertanyaan === '') return ['error' => 'Pertanyaan wajib diisi.'];
+
+    // Tipe soal: pg (pilihan ganda) | essay | uraian — dua terakhir dinilai
+    // manual guru lewat menu Koreksi, jadi opsi & kunci huruf tidak dipakai.
+    $tipe = strtolower(bersih($d['tipe'] ?? 'pg'));
+    if ($tipe === '') $tipe = 'pg';
+    if (!in_array($tipe, ['pg', 'essay', 'uraian'], true)) {
+        return ['error' => 'Tipe soal tidak valid (pilihan ganda / essay / uraian).'];
+    }
+    $kunciTeks = (string) ($d['kunci_teks'] ?? '');
+    if (panjangTeks($kunciTeks) > 20000) return ['error' => 'Kunci/rubrik jawaban terlalu panjang (maks 20.000 karakter).'];
+    $bacaanId = bersih($d['bacaan_id'] ?? '');
+
+    if ($tipe !== 'pg') {
+        $gambar = (string) ($d['gambar'] ?? '');
+        if ($gambar !== '' && (strpos($gambar, 'data:image/') !== 0 || strlen($gambar) > 400000)) {
+            return ['error' => 'Format/ukuran gambar soal tidak valid.'];
+        }
+        return [
+            'pertanyaan' => $pertanyaan,
+            'opsi_a' => '', 'opsi_b' => '', 'opsi_c' => '', 'opsi_d' => '', 'opsi_e' => '',
+            'kunci_jawaban' => '',
+            'gambar' => $gambar,
+            'opsi_huruf' => 0,
+            'tipe' => $tipe,
+            'kunci_teks' => $kunciTeks,
+            'bacaan_id' => $bacaanId,
+        ];
+    }
 
     // Huruf depan pilihan tidak perlu dipilih mode lagi — DETEKSI OTOMATIS:
     // bila semua pilihan berisi memakai penanda hurufnya sendiri ("A. …" di
@@ -1476,6 +1835,9 @@ function validasiIsiSoal(array $d): array
         'kunci_jawaban' => $kunci,
         'gambar' => $gambar,
         'opsi_huruf' => $opsiHuruf,
+        'tipe' => 'pg',
+        'kunci_teks' => $kunciTeks,
+        'bacaan_id' => $bacaanId,
     ];
 }/** Mode "belum berhuruf": buang penanda "A." / "B)" / "C -" di depan teks.
  *  Catatan: tanda hubung HARUS di-escape (\-) — tanpa itu PCRE membacanya
@@ -1515,6 +1877,8 @@ function panjangTeks(string $t): int
 function a_tambahSoal(array $d): array
 {
     $ujianId = bersih($d['ujian_id'] ?? '');
+    $tolak = tolakBilaBukanMilik($d, $ujianId);
+    if ($tolak) return $tolak;
     $v = validasiIsiSoal($d);
     if (isset($v['error'])) return galat($v['error']);
 
@@ -1532,9 +1896,11 @@ function a_ubahSoal(array $d): array
 
     $lama = satu('SELECT ujian_id FROM soal WHERE id = ?', [$id]);
     if (!$lama) return galat('Soal tidak ditemukan.');
+    $tolak = tolakBilaBukanMilik($d, (string) $lama['ujian_id']);
+    if ($tolak) return $tolak;
 
     jalan(
-        'UPDATE soal SET pertanyaan = ?, opsi_a = ?, opsi_b = ?, opsi_c = ?, opsi_d = ?, opsi_e = ?, opsi_huruf = ?, kunci_jawaban = ?, gambar = ? WHERE id = ?',
+        'UPDATE soal SET pertanyaan = ?, opsi_a = ?, opsi_b = ?, opsi_c = ?, opsi_d = ?, opsi_e = ?, opsi_huruf = ?, kunci_jawaban = ?, gambar = ?, tipe = ?, kunci_teks = ?, bacaan_id = ? WHERE id = ?',
         [
             $v['pertanyaan'],
             $v['opsi_a'],
@@ -1545,6 +1911,9 @@ function a_ubahSoal(array $d): array
             $v['opsi_huruf'],
             $v['kunci_jawaban'],
             $v['gambar'],
+            $v['tipe'],
+            $v['kunci_teks'],
+            $v['bacaan_id'],
             $id,
         ]
     );
@@ -1560,6 +1929,8 @@ function a_imporSoal(array $d): array
 {
     $ujianId = bersih($d['ujian_id'] ?? '');
     if ($ujianId === '') return galat('Ujian tidak valid.');
+    $tolak = tolakBilaBukanMilik($d, $ujianId);
+    if ($tolak) return $tolak;
     $daftar = is_array($d['soal'] ?? null) ? $d['soal'] : [];
     if (!$daftar) return galat('Tidak ada soal untuk diimpor.');
     if (count($daftar) > 200) return galat('Maksimal 200 soal per sekali impor.');
@@ -1590,7 +1961,9 @@ function a_imporSoal(array $d): array
 function a_tambahSoalContoh(array $d): array
 {
     $ujianId = bersih($d['ujian_id'] ?? '');
-    foreach (SOAL_CONTOH as $s) sisipSoal($ujianId, $s);
+    $tolak = tolakBilaBukanMilik($d, $ujianId);
+    if ($tolak) return $tolak;
+    foreach (SOAL_CONTOH as $s) sisipSoal($ujianId, ['tipe' => 'pg', 'bacaan_id' => '', 'kunci_teks' => ''] + $s);
     naikkanRevisi($ujianId);
     return ['success' => true, 'message' => count(SOAL_CONTOH) . ' soal contoh ditambahkan.'];
 }
@@ -1599,6 +1972,10 @@ function a_hapusSoal(array $d): array
 {
     $id = bersih($d['id'] ?? '');
     $lama = satu('SELECT ujian_id FROM soal WHERE id = ?', [$id]);
+    if ($lama) {
+        $tolak = tolakBilaBukanMilik($d, (string) $lama['ujian_id']);
+        if ($tolak) return $tolak;
+    }
     jalan('DELETE FROM soal WHERE id = ?', [$id]);
     if ($lama) naikkanRevisi((string) $lama['ujian_id']);
     return ['success' => true, 'message' => 'Soal dihapus.'];
@@ -1623,26 +2000,50 @@ function a_submitJawaban(array $d): array
     $meta = cariUjian($ujianId);
     if (!$meta) return galat('Ujian tidak ditemukan.');
 
+    // Bobot: tiap soal bernilai 100 poin. PG benar = 100; essay/uraian
+    // dinilai manual (awalnya 0, menunggu koreksi guru).
     $kunciMap = [];
+    $tipeMap = [];
     $totalSoal = 0;
-    foreach (semua('SELECT id, kunci_jawaban FROM soal WHERE ujian_id = ?', [$ujianId]) as $s) {
-        $kunciMap[$s['id']] = strtoupper(bersih($s['kunci_jawaban']));
+    foreach (semua('SELECT id, kunci_jawaban, tipe FROM soal WHERE ujian_id = ?', [$ujianId]) as $s) {
+        $idS = (string) $s['id'];
+        $kunciMap[$idS] = strtoupper(bersih($s['kunci_jawaban']));
+        $tipe = strtolower(bersih($s['tipe'] ?? 'pg'));
+        $tipeMap[$idS] = in_array($tipe, ['essay', 'uraian'], true) ? $tipe : 'pg';
         $totalSoal++;
     }
 
-    $benar = 0;
+    $hasilId = idBaru('h');
+    $poin = 0;
     foreach ($jawaban as $item) {
         $idSoal = (string) ($item['id_soal'] ?? '');
+        if (!isset($tipeMap[$idSoal]) || $tipeMap[$idSoal] !== 'pg') continue;
         $pilihan = strtoupper(bersih($item['pilihan'] ?? ''));
-        if ($pilihan !== '' && isset($kunciMap[$idSoal]) && $kunciMap[$idSoal] === $pilihan) $benar++;
+        if ($pilihan !== '' && $kunciMap[$idSoal] === $pilihan) $poin += 100;
     }
 
-    $nilai = $totalSoal > 0 ? (int) round(($benar / $totalSoal) * 100) : 0;
+    // Jawaban teks (essay/uraian) disimpan untuk dikoreksi manual guru.
+    foreach ($jawaban as $item) {
+        $idSoal = (string) ($item['id_soal'] ?? '');
+        if (!isset($tipeMap[$idSoal]) || $tipeMap[$idSoal] === 'pg') continue;
+        $teks = (string) ($item['teks'] ?? '');
+        if (function_exists('mb_substr')) $teks = mb_substr($teks, 0, 20000);
+        else $teks = substr($teks, 0, 20000);
+        if (trim($teks) === '') continue;
+        jalan(
+            'INSERT INTO jawaban_teks (hasil_id, soal_id, ujian_id, teks, skor) VALUES (?,?,?,?,NULL)
+             ON DUPLICATE KEY UPDATE teks = VALUES(teks), skor = NULL',
+            [$hasilId, $idSoal, $ujianId, $teks]
+        );
+    }
+
+    $nilai = $totalSoal > 0 ? (int) round($poin / $totalSoal) : 0;
+    $benar = (int) round($poin / 100);
     jalan(
-        'INSERT INTO hasil (id, ujian_id, ujian_judul, nama, kelas, token, benar, total_soal, nilai, total_pelanggaran)
-         VALUES (?,?,?,?,?,?,?,?,?,?)',
+        'INSERT INTO hasil (id, ujian_id, ujian_judul, nama, kelas, token, benar, total_soal, nilai, poin, total_pelanggaran)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)',
         [
-            idBaru('h'),
+            $hasilId,
             $ujianId,
             (string) $meta['judul'],
             $nama,
@@ -1651,6 +2052,7 @@ function a_submitJawaban(array $d): array
             $benar,
             $totalSoal,
             $nilai,
+            $poin,
             $totalPelanggaran,
         ]
     );
@@ -1659,17 +2061,70 @@ function a_submitJawaban(array $d): array
         'success' => true,
         'nilai' => $nilai,
         'benar' => $benar,
+        'poin' => $poin,
         'total_soal' => $totalSoal,
         'total_pelanggaran' => $totalPelanggaran,
         'message' => 'Jawaban tersimpan.',
     ];
 }
 
+/** Hitung ulang poin/nilai/benar satu kiriman dari soal + skor koreksi. */
+function hitungUlangHasil(string $hasilId): void
+{
+    $h = satu('SELECT ujian_id FROM hasil WHERE id = ?', [$hasilId]);
+    if (!$h) return;
+    $ujianId = (string) $h['ujian_id'];
+
+    $totalSoal = 0;
+    $pgBenar = 0;
+    foreach (semua('SELECT id, tipe FROM soal WHERE ujian_id = ?', [$ujianId]) as $s) {
+        $totalSoal++;
+        if (strtolower(bersih($s['tipe'] ?? 'pg')) !== 'pg') continue;
+        $r = satu(
+            'SELECT pilihan FROM jawaban WHERE hasil_id = ? AND soal_id = ?',
+            [$hasilId, (string) $s['id']]
+        );
+        if ($r) $pgBenar++;
+    }
+
+    $poin = $pgBenar * 100;
+    $tipeMap = [];
+    foreach (semua('SELECT id, tipe FROM soal WHERE ujian_id = ?', [$ujianId]) as $s) {
+        $tipeMap[(string) $s['id']] = strtolower(bersih($s['tipe'] ?? 'pg'));
+    }
+    foreach (semua('SELECT soal_id, skor FROM jawaban_teks WHERE hasil_id = ?', [$hasilId]) as $j) {
+        $idS = (string) $j['soal_id'];
+        if (($tipeMap[$idS] ?? 'pg') === 'pg') continue;
+        if ($j['skor'] === null) continue;
+        $skor = max(0, min(100, (int) $j['skor']));
+        $poin += $skor;
+    }
+
+    $nilai = $totalSoal > 0 ? (int) round($poin / $totalSoal) : 0;
+    jalan(
+        'UPDATE hasil SET poin = ?, nilai = ?, benar = ? WHERE id = ?',
+        [$poin, $nilai, (int) round($poin / 100), $hasilId]
+    );
+}
+
+/** Jumlah soal essay/uraian yang jawabannya belum dikoreksi. */
+function jumlahMenunggu(string $hasilId, string $ujianId): int
+{
+    $sql = "SELECT COUNT(*) AS n FROM jawaban_teks j
+            JOIN soal s ON s.id = j.soal_id
+            WHERE j.hasil_id = ? AND j.skor IS NULL
+              AND LOWER(COALESCE(s.tipe,'pg')) IN ('essay','uraian')";
+    $r = satu($sql, [$hasilId]);
+    return (int) ($r['n'] ?? 0);
+}
+
 function barisHasil(array $r): array
 {
+    $hasilId = (string) $r['id'];
+    $ujianId = (string) $r['ujian_id'];
     return [
-        'id' => (string) $r['id'],
-        'ujian_id' => (string) $r['ujian_id'],
+        'id' => $hasilId,
+        'ujian_id' => $ujianId,
         'ujian_judul' => (string) $r['ujian_judul'],
         'nama' => (string) $r['nama'],
         'kelas' => (string) $r['kelas'],
@@ -1677,6 +2132,8 @@ function barisHasil(array $r): array
         'benar' => (int) $r['benar'],
         'total_soal' => (int) $r['total_soal'],
         'nilai' => (int) $r['nilai'],
+        'poin' => (int) ($r['poin'] ?? 0),
+        'menunggu' => jumlahMenunggu($hasilId, $ujianId),
         'total_pelanggaran' => (int) $r['total_pelanggaran'],
         'timestamp' => isset($r['timestamp']) && $r['timestamp'] ? (string) $r['timestamp'] : '',
     ];
@@ -1684,7 +2141,10 @@ function barisHasil(array $r): array
 
 function a_getHasil(array $d): array
 {
-    $rows = semua('SELECT * FROM hasil WHERE ujian_id = ? ORDER BY timestamp DESC', [bersih($d['ujian_id'] ?? '')]);
+    $ujianId = bersih($d['ujian_id'] ?? '');
+    $tolak = tolakBilaBukanMilik($d, $ujianId);
+    if ($tolak) return $tolak;
+    $rows = semua('SELECT * FROM hasil WHERE ujian_id = ? ORDER BY timestamp DESC', [$ujianId]);
     return ['success' => true, 'hasil' => array_map('barisHasil', $rows)];
 }
 
@@ -1697,6 +2157,147 @@ function a_getHasilSaya(array $d): array
         if (strtolower(bersih($r['nama'])) === $cari) $daftar[] = barisHasil($r);
     }
     return ['success' => true, 'hasil' => $daftar];
+}
+
+/* ------------------------------------------------------------------ */
+/* KOREKSI MANUAL (essay & uraian)                                     */
+/* ------------------------------------------------------------------ */
+
+/** Daftar kiriman siswa satu ujian + jumlah yang menunggu koreksi. */
+function a_getKoreksi(array $d): array
+{
+    $ujianId = bersih($d['ujian_id'] ?? '');
+    $tolak = tolakBilaBukanMilik($d, $ujianId);
+    if ($tolak) return $tolak;
+
+    $soal = [];
+    foreach (semua('SELECT * FROM soal WHERE ujian_id = ? ORDER BY id', [$ujianId]) as $s) {
+        $b = barisSoal($s, true, petaBacaan($ujianId));
+        if ($b['tipe'] === 'pg') continue;
+        $soal[] = $b;
+    }
+
+    $kiriman = array_map('barisHasil', semua(
+        'SELECT * FROM hasil WHERE ujian_id = ? ORDER BY timestamp DESC',
+        [$ujianId]
+    ));
+
+    return ['success' => true, 'soal' => $soal, 'kiriman' => $kiriman];
+}
+
+/** Jawaban teks satu kiriman siswa (untuk layar koreksi). */
+function a_getJawabanKoreksi(array $d): array
+{
+    $hasilId = bersih($d['hasil_id'] ?? '');
+    $h = satu('SELECT ujian_id, nama, kelas FROM hasil WHERE id = ?', [$hasilId]);
+    if (!$h) return galat('Kiriman jawaban tidak ditemukan.');
+    $tolak = tolakBilaBukanMilik($d, (string) $h['ujian_id']);
+    if ($tolak) return $tolak;
+
+    $jawaban = [];
+    foreach (semua('SELECT soal_id, teks, skor FROM jawaban_teks WHERE hasil_id = ?', [$hasilId]) as $j) {
+        $jawaban[(string) $j['soal_id']] = [
+            'soal_id' => (string) $j['soal_id'],
+            'teks' => (string) $j['teks'],
+            'skor' => $j['skor'] === null ? null : (int) $j['skor'],
+        ];
+    }
+
+    return [
+        'success' => true,
+        'hasil' => [
+            'id' => $hasilId,
+            'ujian_id' => (string) $h['ujian_id'],
+            'nama' => (string) $h['nama'],
+            'kelas' => (string) $h['kelas'],
+        ],
+        'jawaban' => $jawaban,
+    ];
+}
+
+/** Simpan skor 0–100 per soal essay/uraian, lalu hitung ulang nilai. */
+function a_simpanKoreksi(array $d): array
+{
+    $hasilId = bersih($d['hasil_id'] ?? '');
+    $h = satu('SELECT ujian_id FROM hasil WHERE id = ?', [$hasilId]);
+    if (!$h) return galat('Kiriman jawaban tidak ditemukan.');
+    $tolak = tolakBilaBukanMilik($d, (string) $h['ujian_id']);
+    if ($tolak) return $tolak;
+
+    $skor = is_array($d['skor'] ?? null) ? $d['skor'] : [];
+    if (!$skor) return galat('Tidak ada skor untuk disimpan.');
+
+    $tipeSoal = [];
+    foreach (semua('SELECT id, tipe FROM soal WHERE ujian_id = ?', [(string) $h['ujian_id']]) as $s) {
+        $tipeSoal[(string) $s['id']] = strtolower(bersih($s['tipe'] ?? 'pg'));
+    }
+
+    $tersimpan = 0;
+    foreach ($skor as $soalId => $nilai) {
+        $soalId = bersih($soalId);
+        if ($soalId === '' || !isset($tipeSoal[$soalId]) || $tipeSoal[$soalId] === 'pg') continue;
+        $n = max(0, min(100, (int) $nilai));
+        $k = jalan(
+            'UPDATE jawaban_teks SET skor = ? WHERE hasil_id = ? AND soal_id = ?',
+            [$n, $hasilId, $soalId]
+        );
+        if ($k > 0) $tersimpan++;
+    }
+    if ($tersimpan === 0) return galat('Tidak ada skor yang tersimpan — pastikan soal essay/uraian punya jawaban siswa.');
+
+    hitungUlangHasil($hasilId);
+    $r = satu('SELECT benar, total_soal, nilai, poin FROM hasil WHERE id = ?', [$hasilId]);
+    return [
+        'success' => true,
+        'message' => $tersimpan . ' jawaban dikoreksi — nilai dihitung ulang.',
+        'hasil' => [
+            'benar' => (int) ($r['benar'] ?? 0),
+            'total_soal' => (int) ($r['total_soal'] ?? 0),
+            'nilai' => (int) ($r['nilai'] ?? 0),
+            'poin' => (int) ($r['poin'] ?? 0),
+            'menunggu' => jumlahMenunggu($hasilId, (string) $h['ujian_id']),
+        ],
+    ];
+}
+
+/** Tambah/perbarui teks bacaan bersama (dipakai beberapa soal). */
+function a_simpanBacaan(array $d): array
+{
+    $ujianId = bersih($d['ujian_id'] ?? '');
+    $tolak = tolakBilaBukanMilik($d, $ujianId);
+    if ($tolak) return $tolak;
+
+    $judul = bersih($d['judul'] ?? '');
+    $teks = (string) ($d['teks'] ?? '');
+    if (trim($teks) === '') return galat('Isi teks bacaan wajib diisi.');
+    if (panjangTeks($teks) > 60000) return galat('Teks bacaan terlalu panjang (maks 60.000 karakter).');
+
+    $id = bersih($d['id'] ?? '');
+    if ($id !== '') {
+        $n = jalan('UPDATE bacaan SET judul = ?, teks = ? WHERE id = ? AND ujian_id = ?', [$judul, $teks, $id, $ujianId]);
+        return $n > 0
+            ? ['success' => true, 'id' => $id, 'message' => 'Teks bacaan diperbarui — semua soal terkait ikut terbaru.']
+            : galat('Teks bacaan tidak ditemukan.');
+    }
+
+    $id = idBaru('bc');
+    jalan('INSERT INTO bacaan (id, ujian_id, judul, teks) VALUES (?,?,?,?)', [$id, $ujianId, $judul, $teks]);
+    return ['success' => true, 'id' => $id, 'message' => 'Teks bacaan ditambahkan.'];
+}
+
+/** Hapus teks bacaan — soal terkait otomatis lepas (bacaan_id dikosongkan). */
+function a_hapusBacaan(array $d): array
+{
+    $id = bersih($d['id'] ?? '');
+    $b = satu('SELECT ujian_id FROM bacaan WHERE id = ?', [$id]);
+    if (!$b) return galat('Teks bacaan tidak ditemukan.');
+    $tolak = tolakBilaBukanMilik($d, (string) $b['ujian_id']);
+    if ($tolak) return $tolak;
+
+    jalan('UPDATE soal SET bacaan_id = \'\' WHERE bacaan_id = ?', [$id]);
+    jalan('DELETE FROM bacaan WHERE id = ?', [$id]);
+    naikkanRevisi((string) $b['ujian_id']);
+    return ['success' => true, 'message' => 'Teks bacaan dihapus — soal terkait tidak lagi memakainya.'];
 }
 
 /* ------------------------------------------------------------------ */
@@ -1785,6 +2386,746 @@ function a_aturKartuSet(array $d): array
     simpanPengaturan('kartu_logo', (string) ($d['logo'] ?? ''));
     simpanPengaturan('kartu_ttd', (string) ($d['ttd'] ?? ''));
     return ['success' => true, 'message' => 'Pengaturan kartu ujian disimpan.'];
+}
+
+/* ------------------------------------------------------------------ */
+/* RUANG UJIAN, JADWAL PENGAWAS & PENEMPATAN TEMPAT DUDUK (admin)      */
+/* ------------------------------------------------------------------ */
+
+/** Tingkat dari kelas: "X.1" → "X", "XI" → "XI". */
+function tingkatDariKelas(string $kelas): string
+{
+    $k = strtoupper(trim($kelas));
+    if ($k === '') return '';
+    $pos = strpos($k, '.');
+    return $pos !== false ? trim(substr($k, 0, $pos)) : $k;
+}
+
+/** Urut tingkat: X, XI, XII — selain itu di belakang. */
+function urutTingkat(string $t): int
+{
+    $map = ['X' => 1, 'XI' => 2, 'XII' => 3, 'XIII' => 4];
+    return $map[strtoupper(trim($t))] ?? 99;
+}
+
+/** Daftar ruang (terurut urutan buat). */
+function daftarRuang(): array
+{
+    return array_map(function ($r) {
+        $komp = [];
+        $j = json_decode((string) ($r['komposisi'] ?? ''), true);
+        if (is_array($j)) {
+            foreach ($j as $t => $n) {
+                $tk = strtoupper(bersih($t));
+                if ($tk !== '' && (int) $n > 0) $komp[$tk] = (int) $n;
+            }
+        }
+        return [
+            'id' => (string) $r['id'],
+            'nama' => (string) $r['nama'],
+            'kapasitas' => (int) $r['kapasitas'],
+            'komposisi' => $komp,
+            'urutan' => (int) $r['urutan'],
+        ];
+    }, semua('SELECT * FROM ruang ORDER BY urutan, nama'));
+}
+
+/** NIP guru pengawas terpilih (tersimpan JSON di tabel pengaturan). */
+function daftarPengawas(): array
+{
+    $j = json_decode(bacaPengaturan('ruang_pengawas', '[]'), true);
+    $out = [];
+    if (is_array($j)) {
+        foreach ($j as $nip) {
+            $n = bersih($nip);
+            if ($n !== '') $out[] = $n;
+        }
+    }
+    return array_values(array_unique($out));
+}
+
+/** Normalisasi jam "07:30" / "7.30" → "07.30" (bila valid). */
+function jamNormal(string $v): string
+{
+    if (!preg_match('/^(\d{1,2})[:.\-](\d{2})$/', trim($v), $m)) return '';
+    $j = (int) $m[1];
+    $mi = (int) $m[2];
+    if ($j > 23 || $mi > 59) return '';
+    return sprintf('%02d.%02d', $j, $mi);
+}
+
+function a_getRuangSet(): array
+{
+    $ruang = daftarRuang();
+    $namaRuang = [];
+    foreach ($ruang as $r) $namaRuang[$r['id']] = $r['nama'];
+
+    $jadwal = [];
+    foreach (semua('SELECT * FROM jadwal_pengawas ORDER BY tanggal, sesi, ruang_nama') as $r) {
+        $rid = (string) $r['ruang_id'];
+        $jadwal[] = [
+            'id' => (string) $r['id'],
+            'hari_ke' => (int) $r['hari_ke'],
+            'tanggal' => (string) $r['tanggal'],
+            'sesi' => (int) $r['sesi'],
+            'jam' => (string) $r['jam'],
+            'ruang_id' => $rid,
+            'ruang_nama' => (string) ($r['ruang_nama'] !== '' ? $r['ruang_nama'] : ($namaRuang[$rid] ?? '')),
+            'nip' => (string) $r['nip'],
+            'nama' => (string) $r['nama'],
+        ];
+    }
+
+    $penempatan = [];
+    $sql = 'SELECT p.ruang_id, p.nisn, p.nama, p.kelas, p.kursi, r.nama AS rnama
+            FROM penempatan p LEFT JOIN ruang r ON r.id = p.ruang_id
+            ORDER BY r.urutan, r.nama, p.kursi';
+    foreach (semua($sql) as $p) {
+        $penempatan[] = [
+            'ruang_id' => (string) $p['ruang_id'],
+            'ruang_nama' => (string) ($p['rnama'] ?? ''),
+            'nisn' => (string) $p['nisn'],
+            'nama' => (string) $p['nama'],
+            'kelas' => (string) $p['kelas'],
+            'kursi' => (int) $p['kursi'],
+        ];
+    }
+
+    return [
+        'success' => true,
+        'ruang' => $ruang,
+        'pengawas' => daftarPengawas(),
+        'jadwal' => $jadwal,
+        'penempatan' => $penempatan,
+    ];
+}
+
+function a_simpanRuang(array $d): array
+{
+    $id = bersih($d['id'] ?? '');
+    $nama = bersih($d['nama'] ?? '');
+    if ($nama === '') return galat('Nama ruang wajib diisi.');
+    if (strlen($nama) > 64) return galat('Nama ruang maksimal 64 karakter.');
+    $kapasitas = max(1, min(200, (int) ($d['kapasitas'] ?? 0)));
+
+    $komp = [];
+    if (is_array($d['komposisi'] ?? null)) {
+        foreach ($d['komposisi'] as $t => $n) {
+            $tk = strtoupper(bersih($t));
+            $jml = (int) $n;
+            if ($tk === '' || $jml < 0) continue;
+            if ($jml > 0) $komp[$tk] = $jml;
+        }
+    }
+    // Setiap ruang = campuran TEPAT dua tingkat (X+XI, X+XII, atau XI+XII)
+    // dan jumlah keduanya harus sama dengan kapasitas ruang.
+    if (count($komp) !== 2) {
+        return galat(
+            'Komposisi ruang harus tepat 2 tingkat (mis. X & XI, X & XII, atau XI & XII) — '
+            . 'kosongkan tingkat yang tidak dipakai.'
+        );
+    }
+    $totalKomp = (int) array_sum($komp);
+    if ($totalKomp !== $kapasitas) {
+        return galat(
+            "Total kedua tingkat ($totalKomp siswa) harus SAMA dengan kapasitas ruang ($kapasitas)."
+        );
+    }
+
+    $kompJson = $komp ? (string) json_encode($komp, JSON_UNESCAPED_UNICODE) : '';
+    $pesanTambahan = '';
+
+    if ($id !== '') {
+        $lama = satu('SELECT kapasitas, komposisi FROM ruang WHERE id = ?', [$id]);
+        if (!$lama) return galat('Ruang tidak ditemukan.');
+        $strukturBaru = ((int) $lama['kapasitas'] !== $kapasitas)
+            || (string) $lama['komposisi'] !== $kompJson;
+        jalan(
+            'UPDATE ruang SET nama = ?, kapasitas = ?, komposisi = ? WHERE id = ?',
+            [$nama, $kapasitas, $kompJson, $id]
+        );
+        // Jadwal pengawas ikut memakai nama ruang terbaru.
+        jalan('UPDATE jadwal_pengawas SET ruang_nama = ? WHERE ruang_id = ?', [$nama, $id]);
+        if ($strukturBaru) {
+            jalan('DELETE FROM penempatan WHERE ruang_id = ?', [$id]);
+            $pesanTambahan = ' Struktur ruang berubah — penempatan pada ruang ini direset, susun ulang tempat duduk.';
+        }
+    } else {
+        $maks = satu('SELECT MAX(urutan) AS m FROM ruang');
+        $id = idBaru('rg');
+        jalan(
+            'INSERT INTO ruang (id, nama, kapasitas, komposisi, urutan) VALUES (?,?,?,?,?)',
+            [$id, $nama, $kapasitas, $kompJson, ((int) ($maks['m'] ?? 0)) + 1]
+        );
+    }
+
+    return ['success' => true, 'id' => $id, 'message' => 'Ruang "' . $nama . '" tersimpan.' . $pesanTambahan];
+}
+
+function a_hapusRuang(array $d): array
+{
+    $id = bersih($d['id'] ?? '');
+    if ($id === '') return galat('Ruang tidak valid.');
+    $lama = satu('SELECT nama FROM ruang WHERE id = ?', [$id]);
+    if (!$lama) return galat('Ruang tidak ditemukan.');
+    jalan('DELETE FROM ruang WHERE id = ?', [$id]);
+    jalan('DELETE FROM penempatan WHERE ruang_id = ?', [$id]);
+    jalan('DELETE FROM jadwal_pengawas WHERE ruang_id = ?', [$id]);
+    return ['success' => true, 'message' => 'Ruang "' . bersih($lama['nama']) . '" beserta jadwal & penempatannya dihapus.'];
+}
+
+function a_simpanPengawas(array $d): array
+{
+    $namaGuru = [];
+    foreach (semua('SELECT nip, nama FROM guru') as $g) {
+        $namaGuru[strtolower(bersih($g['nip']))] = true;
+    }
+    $pilih = [];
+    $tanpa = 0;
+    foreach ((is_array($d['nips'] ?? null) ? $d['nips'] : []) as $nip) {
+        $n = bersih($nip);
+        if ($n === '') continue;
+        if (!isset($namaGuru[strtolower($n)])) {
+            $tanpa++;
+            continue;
+        }
+        $pilih[] = $n;
+    }
+    $pilih = array_values(array_unique($pilih));
+    simpanPengaturan('ruang_pengawas', (string) json_encode($pilih));
+    $pesan = count($pilih) . ' guru ditetapkan sebagai pengawas ruang.';
+    if ($tanpa > 0) $pesan .= " $tanpa NIP tidak ditemukan di Data Guru dan dilewati.";
+    return ['success' => true, 'pengawas' => $pilih, 'message' => $pesan];
+}
+
+function a_buatJadwalPengawas(array $d): array
+{
+    $mulai = bersih($d['tanggal_mulai'] ?? '');
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $mulai)) {
+        return galat('Tanggal mulai ujian wajib diisi (format YYYY-MM-DD).');
+    }
+    $totalHari = max(1, min(60, (int) ($d['total_hari'] ?? 0)));
+    $sesiHari = max(1, min(10, (int) ($d['sesi_per_hari'] ?? 0)));
+
+    $ruang = daftarRuang();
+    if (!$ruang) return galat('Belum ada ruang — buat daftar ruang dulu.');
+    $pengawas = daftarPengawas();
+    if (!$pengawas) return galat('Belum ada guru pengawas — centang guru pengawas dulu.');
+
+    $namaGuru = [];
+    foreach (semua('SELECT nip, nama FROM guru') as $g) {
+        $namaGuru[strtolower(bersih($g['nip']))] = bersih($g['nama']);
+    }
+
+    // Jam per sesi: dari input (pisah koma/spasi/baris) atau default 2,5 jam.
+    $jam = [];
+    $potong = preg_split('/[,;\n]+/', (string) ($d['jam'] ?? '')) ?: [];
+    foreach ($potong as $p) {
+        $n = jamNormal($p);
+        if ($n !== '' && !in_array($n, $jam, true)) $jam[] = $n;
+    }
+    while (count($jam) < $sesiHari) {
+        $menit = 450 + count($jam) * 150; // 07.30, 10.00, 12.30, 15.00, …
+        $jam[] = sprintf('%02d.%02d', intdiv($menit, 60) % 24, $menit % 60);
+    }
+    $jam = array_slice($jam, 0, max($sesiHari, 1));
+
+    jalan('DELETE FROM jadwal_pengawas', []);
+    $idx = 0;
+    $dibuat = 0;
+    $awal = new DateTime($mulai);
+    for ($h = 1; $h <= $totalHari; $h++) {
+        $tanggal = (clone $awal)->modify('+' . ($h - 1) . ' days')->format('Y-m-d');
+        for ($s = 1; $s <= $sesiHari; $s++) {
+            foreach ($ruang as $rg) {
+                $nip = $pengawas[$idx % count($pengawas)];
+                $idx++;
+                jalan(
+                    'INSERT INTO jadwal_pengawas
+                     (id, hari_ke, tanggal, sesi, jam, ruang_id, ruang_nama, nip, nama)
+                     VALUES (?,?,?,?,?,?,?,?,?)',
+                    [
+                        idBaru('jp'),
+                        $h,
+                        $tanggal,
+                        $s,
+                        $jam[$s - 1],
+                        $rg['id'],
+                        $rg['nama'],
+                        $nip,
+                        $namaGuru[strtolower($nip)] ?? $nip,
+                    ]
+                );
+                $dibuat++;
+            }
+        }
+    }
+
+    $pesan = "$dibuat penugasan dibuat: $totalHari hari × $sesiHari sesi/hari × "
+        . count($ruang) . ' ruang, merata dari ' . count($pengawas) . ' guru pengawas.';
+    if (count($pengawas) < count($ruang)) {
+        $pesan .= ' PERINGATAN: guru pengawas lebih sedikit dari jumlah ruang — ada guru yang mengawasi lebih dari satu ruang dalam sesi sama.';
+    }
+    return ['success' => true, 'dibuat' => $dibuat, 'jam' => $jam, 'message' => $pesan];
+}
+
+function a_buatPenempatan(array $d): array
+{
+    $ruang = daftarRuang();
+    if (!$ruang) return galat('Belum ada ruang — buat daftar ruang dulu.');
+    $siswa = semua('SELECT nisn, nama, kelas FROM siswa');
+    if (!$siswa) return galat('Data siswa masih kosong — impor data siswa dulu.');
+
+    // Urut: tingkat (X, XI, XII) → kelas → nama → NISN (natural).
+    usort($siswa, function ($a, $b) {
+        $ta = urutTingkat(tingkatDariKelas((string) $a['kelas']));
+        $tb = urutTingkat(tingkatDariKelas((string) $b['kelas']));
+        if ($ta !== $tb) return $ta <=> $tb;
+        $ka = strnatcasecmp((string) $a['kelas'], (string) $b['kelas']);
+        if ($ka !== 0) return $ka;
+        $na = strnatcasecmp((string) $a['nama'], (string) $b['nama']);
+        if ($na !== 0) return $na;
+        return strnatcasecmp((string) $a['nisn'], (string) $b['nisn']);
+    });
+
+    // Kantong siswa per tingkat (belum terpakai semua).
+    $kantong = [];
+    foreach ($siswa as $s) {
+        $t = tingkatDariKelas((string) $s['kelas']);
+        if ($t === '') $t = 'LAIN';
+        $kantong[$t][] = [
+            'nisn' => bersih($s['nisn']),
+            'nama' => bersih($s['nama']),
+            'kelas' => bersih($s['kelas']),
+        ];
+    }
+
+    jalan('DELETE FROM penempatan', []);
+    $total = 0;
+    $ringkas = [];
+    $kurang = [];
+
+    foreach ($ruang as $rg) {
+        $kursi = 1;
+        $terisi = 0;
+        $pakai = []; // tingkat => sisa jatah (menipis saat digilir)
+        if ($rg['komposisi']) {
+            foreach ($rg['komposisi'] as $t => $n) $pakai[$t] = (int) $n;
+        } else {
+            foreach (array_keys($kantong) as $t) $pakai[$t] = PHP_INT_MAX;
+        }
+        // Urut tingkat agar hasil rapat: X, XI, XII, …
+        uksort($pakai, function ($a, $b) {
+            return urutTingkat($a) <=> urutTingkat($b);
+        });
+        $tingkats = array_keys($pakai);
+        $perTingkat = [];
+        $i = 0;
+        while ($terisi < $rg['kapasitas'] && $tingkats) {
+            // Berhenti bila tak ada lagi siswa yang bisa diambil.
+            $ada = false;
+            foreach ($tingkats as $t) {
+                if ($pakai[$t] > 0 && !empty($kantong[$t])) {
+                    $ada = true;
+                    break;
+                }
+            }
+            if (!$ada) break;
+            $t = $tingkats[$i % count($tingkats)];
+            $i++;
+            if ($pakai[$t] <= 0 || empty($kantong[$t])) continue;
+            $s = array_shift($kantong[$t]);
+            if (!$s || $s['nisn'] === '') continue;
+            $pakai[$t] = $pakai[$t] === PHP_INT_MAX ? PHP_INT_MAX : $pakai[$t] - 1;
+            $perTingkat[$t] = ($perTingkat[$t] ?? 0) + 1;
+            jalan(
+                'INSERT INTO penempatan (ruang_id, nisn, nama, kelas, kursi) VALUES (?,?,?,?,?)',
+                [$rg['id'], $s['nisn'], $s['nama'], $s['kelas'], $kursi]
+            );
+            $kursi++;
+            $terisi++;
+            $total++;
+        }
+        // Catat kekurangan terhadap komposisi yang diminta.
+        $kurangRuang = [];
+        foreach ($rg['komposisi'] as $t => $n) {
+            $isi = (int) ($perTingkat[$t] ?? 0);
+            if ($isi < $n) $kurangRuang[] = "$t hanya $isi/$n";
+        }
+        $ringkas[] = [
+            'ruang' => $rg['nama'],
+            'terisi' => $terisi,
+            'kapasitas' => $rg['kapasitas'],
+        ];
+        if ($terisi < $rg['kapasitas'] || $kurangRuang) {
+            $ket = $terisi . '/' . $rg['kapasitas'];
+            if ($kurangRuang) $ket .= ' — kurang: ' . implode(', ', $kurangRuang);
+            $kurang[] = $rg['nama'] . ' (' . $ket . ')';
+        }
+    }
+
+    // Sisa siswa yang belum punya tempat (di luar total kapasitas semua ruang).
+    $sisaSiswa = 0;
+    foreach ($kantong as $q) $sisaSiswa += count($q);
+
+    $pesan = "$total siswa ditempatkan di " . count($ruang) . ' ruang.';
+    if ($kurang) $pesan .= ' Ruang belum penuh: ' . implode(', ', $kurang) . ' (data siswa sesuai tingkat kurang).';
+    if ($sisaSiswa > 0) $pesan .= " $sisaSiswa siswa belum terbagi — tambah ruang/kapasitas lalu susun ulang.";
+
+    return ['success' => true, 'ditempatkan' => $total, 'ringkas' => $ringkas, 'message' => $pesan];
+}
+
+/* ------------------------------------------------------------------ */
+/* JADWAL HARIAN — satu tanggal, N baris = N sesi (digilir antar tingkat) */
+/* ------------------------------------------------------------------ */
+
+/** Nama kolom pada tabel siswa (huruf kecil semua). */
+function kolomSiswa(): array
+{
+    $out = [];
+    foreach (db()->query('SHOW COLUMNS FROM siswa')->fetchAll() as $r) {
+        $out[] = strtolower(bersih($r['Field'] ?? ''));
+    }
+    return $out;
+}
+
+/** Nama hari besar (MINGGU…SABTU) dari tanggal "YYYY-MM-DD". */
+function namaHari(string $tanggal): string
+{
+    static $h = ['MINGGU', 'SENIN', 'SELASA', 'RABU', 'KAMIS', 'JUMAT', 'SABTU'];
+    $ts = strtotime($tanggal);
+    return $ts === false ? '' : ($h[(int) date('w', $ts)] ?? '');
+}
+
+/**
+ * Deteksi otomatis kolom tingkat/kelas/nis/absen dari nama kolom tabel siswa.
+ * "#kelas" berarti tingkat diturunkan dari kolom kelas (mis. "X.1" → "X").
+ */
+function deteksiKolomSiswa(): array
+{
+    $ada = [];
+    foreach (kolomSiswa() as $k) $ada[$k] = true;
+
+    $auto = ['tingkat' => '', 'kelas' => '', 'nis' => '', 'absen' => ''];
+    foreach (['tingkat', 'grade', 'jenjang'] as $k) {
+        if (isset($ada[$k])) { $auto['tingkat'] = $k; break; }
+    }
+    foreach (['kelas', 'class', 'rombel'] as $k) {
+        if (isset($ada[$k])) { $auto['kelas'] = $k; break; }
+    }
+    if ($auto['tingkat'] === '' && $auto['kelas'] !== '') $auto['tingkat'] = '#' . $auto['kelas'];
+    foreach (['nis', 'nisn', 'no_induk'] as $k) {
+        if (isset($ada[$k])) { $auto['nis'] = $k; break; }
+    }
+    foreach (['absen', 'no_absen', 'nomor_absen'] as $k) {
+        if (isset($ada[$k])) { $auto['absen'] = $k; break; }
+    }
+    return $auto;
+}
+
+/** Setelan jadwal harian: deteksi kolom, pilihan admin, kalender (hari kerja + libur). */
+function a_getSetelGas(): array
+{
+    $auto = deteksiKolomSiswa();
+
+    $konf = json_decode(bacaPengaturan('jadwal_kolom'), true);
+    if (!is_array($konf)) $konf = [];
+    $kolom = [
+        'tingkat' => bersih($konf['tingkat'] ?? ''),
+        'kelas' => bersih($konf['kelas'] ?? ''),
+        'nis' => bersih($konf['nis'] ?? ''),
+        'absen' => bersih($konf['absen'] ?? ''),
+    ];
+    foreach ($kolom as $kunci => $v) {
+        if ($v === '') $kolom[$kunci] = $auto[$kunci];
+    }
+
+    $kal = json_decode(bacaPengaturan('kalender_ajaran'), true);
+    if (!is_array($kal)) $kal = [];
+    $hariKerja = [];
+    foreach ((array) ($kal['hari_kerja'] ?? [1, 2, 3, 4, 5]) as $h) {
+        $h = (int) $h;
+        if ($h >= 1 && $h <= 7 && !in_array($h, $hariKerja, true)) $hariKerja[] = $h;
+    }
+    if (!$hariKerja) $hariKerja = [1, 2, 3, 4, 5];
+    sort($hariKerja);
+    $libur = [];
+    foreach ((array) ($kal['libur'] ?? []) as $tgl) {
+        $tgl = bersih($tgl);
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $tgl) && !in_array($tgl, $libur, true)) $libur[] = $tgl;
+    }
+    sort($libur);
+
+    // Contoh baris data siswa — membantu admin mengenali kolom yang tepat.
+    $pilih = [];
+    foreach ([$kolom['tingkat'], $kolom['kelas'], $kolom['nis'], $kolom['absen']] as $c) {
+        if ($c !== '' && strpos($c, '#') !== 0 && !in_array($c, $pilih, true)) $pilih[] = $c;
+    }
+    $contoh = [];
+    if ($pilih) {
+        $sel = 'SELECT ' . implode(', ', array_map(function ($c) {
+            return '`' . str_replace('`', '', $c) . '`';
+        }, $pilih)) . ' FROM siswa ORDER BY kelas, nama LIMIT 6';
+        $contoh = semua($sel);
+    }
+
+    return [
+        'success' => true,
+        'kolom' => $kolom,
+        'auto' => $auto,
+        'daftar_kolom' => kolomSiswa(),
+        'contoh' => $contoh,
+        'hari_kerja' => $hariKerja,
+        'libur' => $libur,
+    ];
+}
+
+/** Simpan setelan jadwal harian (pilihan kolom + kalender hari kerja/libur). */
+function a_setelGas(array $d): array
+{
+    $k = is_array($d['kolom'] ?? null) ? $d['kolom'] : [];
+    $kolom = [
+        'tingkat' => bersih($k['tingkat'] ?? ''),
+        'kelas' => bersih($k['kelas'] ?? ''),
+        'nis' => bersih($k['nis'] ?? ''),
+        'absen' => bersih($k['absen'] ?? ''),
+    ];
+    $valid = kolomSiswa();
+    foreach ($kolom as $c) {
+        // Nilai "#kelas" bukan kolom nyata — tingkat diturunkan dari kolom kelas.
+        if ($c !== '' && strpos($c, '#') !== 0 && !in_array($c, $valid, true)) {
+            return galat("Kolom siswa \"$c\" tidak ada di tabel siswa.");
+        }
+    }
+    if ($kolom['tingkat'] === '' && $kolom['kelas'] === '') {
+        return galat('Pilih minimal kolom Tingkat atau Kelas.');
+    }
+
+    $hariKerja = [];
+    foreach ((array) ($d['hari_kerja'] ?? []) as $h) {
+        $h = (int) $h;
+        if ($h >= 1 && $h <= 7 && !in_array($h, $hariKerja, true)) $hariKerja[] = $h;
+    }
+    if (!$hariKerja) $hariKerja = [1, 2, 3, 4, 5];
+    sort($hariKerja);
+
+    $libur = [];
+    foreach ((array) ($d['libur'] ?? []) as $tgl) {
+        $tgl = bersih($tgl);
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $tgl) && !in_array($tgl, $libur, true)) $libur[] = $tgl;
+    }
+    sort($libur);
+
+    simpanPengaturan('jadwal_kolom', json_encode($kolom, JSON_UNESCAPED_UNICODE));
+    simpanPengaturan(
+        'kalender_ajaran',
+        json_encode(['hari_kerja' => $hariKerja, 'libur' => $libur], JSON_UNESCAPED_UNICODE)
+    );
+
+    return ['success' => true, 'message' => 'Setelan kolom & kalender jadwal disimpan.'];
+}
+
+/** Daftar guru untuk kolom "Pengawas" jadwal harian (admin). */
+function a_getGuruGas(): array
+{
+    return ['success' => true, 'guru' => semua('SELECT nip, nama, mapel FROM guru ORDER BY nama')];
+}
+
+/** Baris jadwal harian siap cetak untuk satu tanggal (digilir antar tingkat). */
+function a_jadwalHarianHarianGas(array $d): array
+{
+    $tanggal = bersih($d['tanggal'] ?? '');
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $tanggal)) {
+        return galat('Tanggal tidak valid.');
+    }
+    $k = is_array($d['kolom'] ?? null) ? $d['kolom'] : [];
+    $tTingkat = bersih($k['tingkat'] ?? '');
+    $tKelas = bersih($k['kelas'] ?? '');
+    $tNis = bersih($k['nis'] ?? '');
+    $tAbsen = bersih($k['absen'] ?? '');
+    if ($tTingkat === '' && $tKelas === '') {
+        return galat('Kolom tingkat/kelas belum terpetakan — periksa kolom pada tabel data siswa.');
+    }
+    $valid = kolomSiswa();
+    foreach ([$tTingkat, $tKelas, $tNis, $tAbsen] as $c) {
+        if ($c !== '' && strpos($c, '#') !== 0 && !in_array($c, $valid, true)) {
+            return galat("Kolom siswa \"$c\" tidak ada di tabel siswa.");
+        }
+    }
+
+    $kolomSel = array_values(array_filter(
+        array_unique([$tTingkat, $tKelas, $tNis, $tAbsen]),
+        function ($c) { return $c !== '' && strpos($c, '#') !== 0; }
+    ));
+    $sel = 'SELECT ' . implode(', ', array_map(function ($c) {
+        return '`' . str_replace('`', '', $c) . '`';
+    }, $kolomSel)) . ' FROM siswa';
+    $semuaSiswa = semua($sel);
+
+    $baris = [];
+    foreach ($semuaSiswa as $s) {
+        $kelas = $tKelas !== '' ? bersih($s[$tKelas] ?? '') : '';
+        $tingkat = $tTingkat !== '' && strpos($tTingkat, '#') !== 0
+            ? bersih($s[$tTingkat] ?? '')
+            : tingkatDariKelas($kelas);
+        if ($tingkat === '') $tingkat = 'LAIN';
+        $baris[] = [
+            'nis' => $tNis !== '' ? bersih($s[$tNis] ?? '') : '',
+            'nama' => bersih($s['nama'] ?? ''),
+            'kelas' => $kelas,
+            'tingkat' => $tingkat,
+            'absen' => $tAbsen !== '' ? (string) (int) ($s[$tAbsen] ?? 0) : '',
+        ];
+    }
+    if (!$baris) return galat('Data siswa masih kosong — impor data siswa dulu.');
+
+    // Urut dalam tiap tingkat: kelas → nama.
+    usort($baris, function ($a, $b) {
+        $ka = strnatcasecmp($a['kelas'], $b['kelas']);
+        if ($ka !== 0) return $ka;
+        return strnatcasecmp($a['nama'], $b['nama']);
+    });
+
+    // Gilir antar tingkat: baris 1 = siswa pertama tiap tingkat (kolom A, B, C, …).
+    $kelompok = [];
+    foreach ($baris as $b) $kelompok[$b['tingkat']][] = $b;
+    $urut = array_keys($kelompok);
+    usort($urut, function ($a, $b) {
+        return urutTingkat($a) <=> urutTingkat($b);
+    });
+    $gilir = [];
+    $i = 0;
+    while (true) {
+        $ada = false;
+        foreach ($urut as $t) {
+            if (isset($kelompok[$t][$i])) {
+                $gilir[] = $kelompok[$t][$i];
+                $ada = true;
+            }
+        }
+        if (!$ada) break;
+        $i++;
+    }
+
+    // Absensi otomatis per kelas bila kolom absen tidak dipilih.
+    $perKelas = [];
+    foreach ($gilir as $idx => $b) {
+        $kunciKelas = $b['kelas'] !== '' ? $b['kelas'] : $b['tingkat'];
+        $perKelas[$kunciKelas] = ($perKelas[$kunciKelas] ?? 0) + 1;
+        if ($gilir[$idx]['absen'] === '') $gilir[$idx]['absen'] = (string) $perKelas[$kunciKelas];
+    }
+
+    // Mapel & pengawas manual yang tersimpan untuk tanggal + sesi ini.
+    $simpanan = [];
+    $sql = 'SELECT tanggal, sesi, mapel, pengawas FROM jadwal_harian WHERE tanggal = ?';
+    foreach (semua($sql, [$tanggal]) as $r) {
+        $simpanan[(int) $r['sesi']] = [
+            'mapel' => bersih($r['mapel']),
+            'pengawas' => json_decode(bersih($r['pengawas']), true) ?: [],
+        ];
+    }
+
+    // Setelan per hari (jumlah sesi + jam) — disimpan di tabel pengaturan.
+    $jumlahSesi = 0;
+    $jamTersimpan = [];
+    $setJson = bacaPengaturan('jadwal_set:' . $tanggal, '');
+    if ($setJson !== '') {
+        $sj = json_decode($setJson, true);
+        if (is_array($sj)) {
+            $jumlahSesi = max(0, (int) ($sj['jumlah_sesi'] ?? 0));
+            foreach ((array) ($sj['jam'] ?? []) as $j) {
+                $j = bersih($j);
+                if ($j !== '') $jamTersimpan[] = $j;
+            }
+        }
+    }
+    // Data lama yang belum punya setelan: jumlah sesi = sesi terbesar tersimpan.
+    if ($jumlahSesi < 1 && $simpanan) $jumlahSesi = max(array_keys($simpanan));
+    $mapelTersimpan = [];
+    for ($i = 1; $i <= $jumlahSesi; $i++) {
+        $mapelTersimpan[] = $simpanan[$i]['mapel'] ?? '';
+    }
+
+    $out = [];
+    foreach ($gilir as $idx => $b) {
+        $sesi = $idx + 1;
+        $s = isset($simpanan[$sesi]) ? $simpanan[$sesi] : ['mapel' => '', 'pengawas' => []];
+        $out[] = $b + [
+            'tanggal' => $tanggal,
+            'hari' => namaHari($tanggal),
+            'sesi' => $sesi,
+            'mapel' => $s['mapel'],
+            'pengawas' => $s['pengawas'],
+        ];
+    }
+
+    return [
+        'success' => true,
+        'tanggal' => $tanggal,
+        'hari' => namaHari($tanggal),
+        'total' => count($out),
+        'set' => [
+            'jumlah_sesi' => $jumlahSesi,
+            'jam' => $jamTersimpan,
+            'mapel' => $mapelTersimpan,
+        ],
+        'baris' => $out,
+    ];
+}
+
+/**
+ * Simpan jadwal SATU tanggal sekaligus: jumlah sesi + jam + mapel per sesi.
+ * Pengawas TIDAK disimpan di sini — diambil otomatis dari "Jadwal pengawas
+ * otomatis" (Ruang ujian) saat jadwal dicetak.
+ */
+function a_jadwalHarianSimpanGas(array $d): array
+{
+    $tanggal = bersih($d['tanggal'] ?? '');
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $tanggal)) {
+        return galat('Tanggal tidak valid.');
+    }
+    $jumlah = (int) ($d['jumlah_sesi'] ?? 0);
+    if ($jumlah < 1 || $jumlah > 10) {
+        return galat('Jumlah sesi harus antara 1 dan 10.');
+    }
+
+    $jamIn = is_array($d['jam'] ?? null) ? $d['jam'] : [];
+    $jam = [];
+    for ($i = 0; $i < $jumlah; $i++) {
+        $v = bersih($jamIn[$i] ?? '');
+        if (!preg_match('/^(\d{1,2})[:.]?(\d{2})$/', $v, $m)) {
+            return galat('Jam sesi ' . ($i + 1) . ' tidak valid (format 07.30).');
+        }
+        $h = (int) $m[1];
+        $menit = (int) $m[2];
+        if ($h > 23 || $menit > 59) {
+            return galat('Jam sesi ' . ($i + 1) . ' tidak valid (format 07.30).');
+        }
+        $jam[] = sprintf('%02d.%02d', $h, $menit);
+    }
+
+    $mapelIn = is_array($d['mapel'] ?? null) ? $d['mapel'] : [];
+    $mapel = [];
+    for ($i = 0; $i < $jumlah; $i++) {
+        $mapel[] = bersih($mapelIn[$i] ?? '');
+    }
+
+    simpanPengaturan(
+        'jadwal_set:' . $tanggal,
+        json_encode(['jumlah_sesi' => $jumlah, 'jam' => $jam], JSON_UNESCAPED_UNICODE)
+    );
+
+    // Ganti seluruh baris mapel tanggal ini agar tidak ada sisa sesi lama.
+    jalan('DELETE FROM jadwal_harian WHERE tanggal = ?', [$tanggal]);
+    for ($i = 0; $i < $jumlah; $i++) {
+        if ($mapel[$i] === '') continue;
+        jalan(
+            'INSERT INTO jadwal_harian (tanggal, sesi, mapel, pengawas) VALUES (?,?,?,?)',
+            [$tanggal, $i + 1, $mapel[$i], '[]']
+        );
+    }
+
+    return ['success' => true, 'message' => 'Jadwal harian tersimpan.'];
 }
 
 /* ------------------------------------------------------------------ */
